@@ -1,0 +1,164 @@
+// ==UserScript==
+// @name         ChatGPT 批量删除 (Hotkey版) - 完美热键版
+// @namespace    https://example.com/
+// @version      2.5
+// @description  Ctrl+Shift+D 开关多选，Ctrl+Shift+X 删除选中 (无视输入框焦点)
+// @match        https://chat.openai.com/*
+// @match        https://chatgpt.com/*
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const CHECK_CLASS = "tm-delete-checkbox";
+    let enabled = false;
+    let accessToken = null;
+
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    // 获取 Token
+    async function getAccessToken() {
+        if (accessToken) return accessToken;
+        try {
+            const res = await fetch('/api/auth/session');
+            const data = await res.json();
+            accessToken = data.accessToken;
+            return accessToken;
+        } catch (e) {
+            console.error("获取 Token 失败", e);
+            return null;
+        }
+    }
+
+    function getChatItems() {
+        return Array.from(document.querySelectorAll('a[href^="/c/"]'));
+    }
+
+    function attachCheckbox(item) {
+        if (item.querySelector("." + CHECK_CLASS)) return;
+
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.className = CHECK_CLASS;
+        cb.style.marginRight = "10px";
+        cb.style.cursor = "pointer";
+        cb.style.flexShrink = "0";
+
+        cb.addEventListener("click", e => e.stopPropagation());
+        cb.addEventListener("mousedown", e => e.stopPropagation());
+
+        item.insertBefore(cb, item.firstChild);
+    }
+
+    function enableMode() {
+        const items = getChatItems();
+        if (items.length === 0) {
+            alert("未找到历史记录，请确保侧边栏已打开并加载完毕。");
+            return;
+        }
+        items.forEach(attachCheckbox);
+    }
+
+    function disableMode() {
+        document.querySelectorAll("." + CHECK_CLASS).forEach(n => n.remove());
+    }
+
+    function toggleMode() {
+        enabled = !enabled;
+        if (enabled) enableMode();
+        else disableMode();
+    }
+
+    function getSelected() {
+        return Array.from(document.querySelectorAll("." + CHECK_CLASS))
+            .filter(cb => cb.checked)
+            .map(cb => cb.closest("a"));
+    }
+
+    function getId(item) {
+        const href = item.getAttribute("href") || "";
+        const m = href.match(/\/c\/([^/?#]+)/);
+        return m ? m[1] : null;
+    }
+
+    async function deleteConversation(id, token) {
+        if (!id) return;
+        const response = await window.fetch(`/backend-api/conversation/${id}`, {
+            method: "PATCH",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${token}`
+            },
+            body: JSON.stringify({ is_visible: false })
+        });
+
+        if (!response.ok) {
+            throw new Error(`删除失败: ${response.status}`);
+        }
+    }
+
+    async function deleteSelected() {
+        const items = getSelected();
+
+        if (items.length === 0) {
+            alert("没有选中会话");
+            return;
+        }
+
+        if (!confirm(`确定删除 ${items.length} 个会话？操作不可恢复。`)) return;
+
+        const token = await getAccessToken();
+        if (!token) {
+            alert("无法获取认证 Token，请刷新页面后重试。");
+            return;
+        }
+
+        let successCount = 0;
+        let failCount = 0;
+
+        for (const item of items) {
+            const id = getId(item);
+            if (!id) continue;
+
+            try {
+                await deleteConversation(id, token);
+                item.style.opacity = "0.3";
+                successCount++;
+
+                await sleep(300);
+
+                const liItem = item.closest('li');
+                if (liItem) {
+                    liItem.remove();
+                } else {
+                    item.remove();
+                }
+            } catch (e) {
+                console.error("删除出错:", e);
+                failCount++;
+            }
+        }
+
+        alert(`执行完毕。成功删除: ${successCount} 个，失败: ${failCount} 个。`);
+        enabled = false;
+        disableMode();
+    }
+
+    // 核心修改：移除大范围的输入框拦截，仅对特定组合键进行最高优先级捕获
+    window.addEventListener("keydown", async e => {
+        if (e.ctrlKey && e.shiftKey) {
+            if (e.code === "KeyD") {
+                e.preventDefault();
+                e.stopPropagation();
+                toggleMode();
+            } else if (e.code === "KeyX") {
+                e.preventDefault();
+                e.stopPropagation();
+                await deleteSelected();
+            }
+        }
+    }, true);
+
+})();
